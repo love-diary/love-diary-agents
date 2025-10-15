@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  agent-service:
+    build: .
+    container_name: love-diary-agents
+    network_mode: "host"  # Use host network for external connectivity
+    # Note: With host mode, ports are directly exposed on host
+    # Service will bind to 0.0.0.0:8000 (configured in .env)
+    environment:
+      # Service Config
+      - PORT=8000
+      - DEBUG=false
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-["*"]}
+
+      # Authentication
+      - AGENT_SERVICE_SECRET=${AGENT_SERVICE_SECRET}
+
+      # Blockchain
+      - BASE_RPC_URL=${BASE_RPC_URL:-https://sepolia.base.org}
+      - CHARACTER_NFT_ADDRESS=${CHARACTER_NFT_ADDRESS}
+
+      # AI/LLM
+      - ASI_MINI_API_KEY=${ASI_MINI_API_KEY}
+      - ASI_MINI_API_URL=${ASI_MINI_API_URL:-https://api.asi1.ai/v1}
+
+      # Database (PostgreSQL via Supabase)
+      - DATABASE_URL=${DATABASE_URL}
+
+      # Agent Config
+      - AGENT_IDLE_TIMEOUT=3600
+      - AGENT_HIBERNATION_CHECK_INTERVAL=300
+      - MAX_ACTIVE_AGENTS=50
+
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+    volumes:
+      - ./logs:/app/logs
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
