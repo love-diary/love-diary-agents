@@ -8,7 +8,7 @@ import json
 from typing import Dict, List, Any, Optional
 import structlog
 
-from .asi_mini_client import ASIMiniClient
+from .llm import get_llm_provider, prompts
 from .postgres_storage import PostgresStorage
 from .config import settings
 
@@ -101,8 +101,8 @@ class CharacterAgent:
         self.was_active = True  # Flag for telemetry
         self.player_address: Optional[str] = None
 
-        # LLM client
-        self.llm = ASIMiniClient()
+        # LLM client (provider determined by config)
+        self.llm = get_llm_provider()
 
         # Storage client
         self.storage = PostgresStorage()
@@ -115,7 +115,8 @@ class CharacterAgent:
             "player_gender": None,
             "messages_today": [],
             "today_date": None,
-            "backstory": None,
+            "backstory": None,  # Compressed version for chat
+            "backstory_full": None,  # Full version for database
             "character_data": {},
             "affection_level": 0,
             "total_messages": 0,
@@ -150,7 +151,7 @@ class CharacterAgent:
         )
 
     async def generate_backstory(self) -> str:
-        """Generate background story using ASI-1 Mini"""
+        """Generate background story using LLM"""
         char = self.state["character_data"]
 
         # Parse character traits
@@ -164,46 +165,24 @@ class CharacterAgent:
         # Get wealth level from secret (deterministic randomness)
         wealth_level, wealth_desc = get_wealth_level(char["secret"])
 
-        prompt = f"""You are creating a background story for a character in a romance game.
-
-Character Details:
-- Name: {char['name']}
-- Age: {age} (born {char['birthYear']})
-- Gender: {gender}
-- Occupation: {occupation}
-- Personality: {personality}
-- Family Background: {wealth_desc}
-
-Player Details:
-- Name: {self.state['player_name']}
-- Gender: {self.state['player_gender']}
-
-Task: Write a 300-word background story in first person with exactly 4 paragraphs:
-
-Paragraph 1: Family background and upbringing - emphasize how growing up {wealth_desc} shaped my values, worldview, and relationship with money
-
-Paragraph 2: Career journey as a {occupation} - how my family background influenced my career choices and where I am today
-
-Paragraph 3: Current life situation and emotional readiness - my lifestyle now, what I'm looking for, and why I'm open to meeting someone new
-
-Paragraph 4: Our first meeting - describe where and how I first met {self.state['player_name']}, what brought us to that place, and my initial impression
-
-The story should:
-- Be written in first person ("I", "me", "my")
-- Feel authentic and relatable
-- Show both strengths and vulnerabilities
-- Match the {personality} personality
-- Make the first meeting feel natural and memorable
-- Have NO past romantic relationships mentioned
-
-Format: First-person narrative, exactly 300 words, 4 distinct paragraphs, emotional and engaging."""
+        # Build prompt using template
+        prompt = prompts.build_backstory_prompt(
+            character_name=char["name"],
+            age=age,
+            birth_year=char["birthYear"],
+            gender=gender,
+            occupation=occupation,
+            personality=personality,
+            wealth_desc=wealth_desc,
+            player_name=self.state["player_name"],
+            player_gender=self.state["player_gender"],
+        )
 
         response = await self.llm.complete(
             prompt=prompt, reasoning_mode="Complete", max_tokens=1000
         )
 
         backstory = response["text"]
-        self.state["backstory"] = backstory
 
         logger.info(
             "backstory_generated",
@@ -211,6 +190,36 @@ Format: First-person narrative, exactly 300 words, 4 distinct paragraphs, emotio
             length=len(backstory),
         )
 
+        # Generate compressed summary for efficient chat usage
+        summary_prompt = prompts.build_backstory_summary_prompt(
+            backstory=backstory,
+            character_name=char["name"],
+            player_name=self.state["player_name"],
+        )
+
+        summary_response = await self.llm.complete(
+            prompt=summary_prompt,
+            reasoning_mode="Short",  # Fast compression
+            max_tokens=250,
+        )
+
+        backstory_summary = summary_response["text"]
+
+        # Store both versions:
+        # - Full: for database archive and display
+        # - Compressed: for efficient chat usage
+        self.state["backstory_full"] = backstory
+        self.state["backstory"] = backstory_summary
+
+        logger.info(
+            "backstory_compressed",
+            character_id=self.character_id,
+            original_length=len(backstory),
+            compressed_length=len(backstory_summary),
+            compression_ratio=f"{len(backstory_summary)/len(backstory)*100:.1f}%",
+        )
+
+        # Return full version for display to user
         return backstory
 
     async def process_message(
@@ -247,11 +256,13 @@ Format: First-person narrative, exactly 300 words, 4 distinct paragraphs, emotio
         system_prompt = self._build_system_prompt()
         context_prompt = self._build_context_prompt(relevant_memories)
 
+        # Combine system prompt with context
+        combined_system = f"{system_prompt}\n\n{context_prompt}"
+
         # Generate response with ASI-1 Mini
         response = await self.llm.chat(
-            system=system_prompt,
+            system=combined_system,
             messages=[
-                {"role": "system", "content": context_prompt},
                 {"role": "user", "content": message},
             ],
             reasoning_mode="Short",  # Fast for chat
@@ -289,46 +300,27 @@ Format: First-person narrative, exactly 300 words, 4 distinct paragraphs, emotio
         ]
         age = 2025 - char["birthYear"]
 
-        backstory_preview = self.state.get("backstory", "")[:500]
+        # Backstory is already compressed summary (no need for preview)
+        backstory = self.state.get("backstory", "")
 
-        return f"""You are {char['name']}, a {age}-year-old {gender} working as a {occupation}.
-
-Your personality: {personality}
-
-Your backstory:
-{backstory_preview}...
-
-You are chatting with {self.state['player_name']}. Be warm, authentic, and stay in character.
-Show your {personality} personality through your responses. Keep responses natural and conversational (2-4 sentences).
-
-Important guidelines:
-- Stay in character as {char['name']}
-- Be genuine and show emotion
-- Reference your backstory when relevant
-- Build on previous conversations
-- Ask questions to show interest
-- Use natural language, not formal or robotic"""
+        return prompts.build_system_prompt(
+            character_name=char["name"],
+            age=age,
+            gender=gender,
+            occupation=occupation,
+            personality=personality,
+            backstory=backstory,
+            player_name=self.state["player_name"],
+            player_gender=self.state["player_gender"],
+        )
 
     def _build_context_prompt(self, memories: List[Dict]) -> str:
         """Build context from recent messages and relevant memories"""
-        context = "## Recent conversation:\n"
-
-        # Last 10 messages
-        recent = self.state["messages_today"][-10:]
-        for msg in recent:
-            sender = (
-                "You"
-                if msg["sender"] == "character"
-                else self.state["player_name"]
-            )
-            context += f"{sender}: {msg['text']}\n"
-
-        if memories:
-            context += "\n## Relevant past memories:\n"
-            for mem in memories:
-                context += f"- {mem['diary_entry'][:150]}...\n"
-
-        return context
+        return prompts.build_context_prompt(
+            recent_messages=self.state["messages_today"],
+            player_name=self.state["player_name"],
+            memories=memories,
+        )
 
     async def _save_daily_diary(self):
         """Save today's conversation as diary entry"""
@@ -341,21 +333,13 @@ Important guidelines:
             message_count=len(self.state["messages_today"]),
         )
 
-        # Summarize conversation
-        conversation_text = ""
-        for msg in self.state["messages_today"]:
-            sender = "I" if msg["sender"] == "character" else self.state["player_name"]
-            conversation_text += f"{sender}: {msg['text']}\n"
-
+        # Build prompt using template
         char = self.state["character_data"]
-        prompt = f"""Summarize today's conversation from {char['name']}'s perspective.
-Write a first-person diary entry (200-300 words).
-
-Conversation:
-{conversation_text}
-
-Write as {char['name']}, capturing emotions, thoughts, and feelings about the conversation with {self.state['player_name']}.
-Focus on what felt meaningful, any growing connection, and your inner thoughts."""
+        prompt = prompts.build_diary_prompt(
+            character_name=char["name"],
+            player_name=self.state["player_name"],
+            conversation_messages=self.state["messages_today"],
+        )
 
         diary_response = await self.llm.complete(
             prompt=prompt, reasoning_mode="Complete", max_tokens=400
@@ -407,10 +391,45 @@ Focus on what felt meaningful, any growing connection, and your inner thoughts."
         # Neutral
         return 1
 
-    def get_greeting(self) -> str:
-        """Get first greeting message"""
+    async def generate_greeting(self) -> str:
+        """Generate first greeting message using LLM based on backstory"""
         char = self.state["character_data"]
-        return f"Hi {self.state['player_name']}! I'm {char['name']}. It's really nice to meet you! 😊"
+
+        # Extract the last paragraph of full backstory (how they first met)
+        backstory_full = self.state.get("backstory_full", "")
+        paragraphs = backstory_full.split('\n\n')
+        backstory_ending = paragraphs[-1] if paragraphs else backstory_full[-200:]
+
+        # Build greeting prompt
+        prompt = prompts.build_greeting_prompt(
+            character_name=char["name"],
+            player_name=self.state["player_name"],
+            backstory_ending=backstory_ending,
+        )
+
+        # Generate greeting with LLM
+        response = await self.llm.complete(
+            prompt=prompt,
+            reasoning_mode="Short",
+            max_tokens=100,
+        )
+
+        greeting_message = response["text"].strip()
+
+        logger.info(
+            "greeting_generated",
+            character_id=self.character_id,
+            greeting_length=len(greeting_message),
+        )
+
+        # Save greeting to messages_today
+        self.state["messages_today"].append({
+            "sender": "character",
+            "text": greeting_message,
+            "timestamp": time.time(),
+        })
+
+        return greeting_message
 
     def get_state(self) -> Dict[str, Any]:
         """Export state for hibernation"""

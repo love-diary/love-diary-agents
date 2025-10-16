@@ -2,7 +2,8 @@
 Configuration management using Pydantic Settings
 """
 
-from pydantic import BaseSettings  # Pydantic 1.x has BaseSettings built-in
+from pydantic_settings import BaseSettings  # Pydantic 2.x
+from pydantic import ConfigDict
 from typing import List
 
 
@@ -22,8 +23,10 @@ class Settings(BaseSettings):
     CHARACTER_NFT_ADDRESS: str
 
     # AI/LLM
-    ASI_MINI_API_KEY: str
+    LLM_PROVIDER: str = "asi"  # "asi" or "openai"
+    ASI_MINI_API_KEY: str = ""
     ASI_MINI_API_URL: str = "https://api.asi1mini.com/v1"  # Placeholder
+    OPENAI_API_KEY: str = ""
 
     # Database (PostgreSQL via Supabase)
     DATABASE_URL: str
@@ -36,9 +39,11 @@ class Settings(BaseSettings):
     # Redis (optional, for distributed setup)
     REDIS_URL: str = ""
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    # Pydantic v2 configuration
+    model_config = ConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+    )
 
 
 # Singleton instance

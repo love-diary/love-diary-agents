@@ -21,8 +21,10 @@ services:
       - CHARACTER_NFT_ADDRESS=${CHARACTER_NFT_ADDRESS}
 
       # AI/LLM
+      - LLM_PROVIDER=${LLM_PROVIDER:-asi}
       - ASI_MINI_API_KEY=${ASI_MINI_API_KEY}
       - ASI_MINI_API_URL=${ASI_MINI_API_URL:-https://api.asi1.ai/v1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
 
       # Database (PostgreSQL via Supabase)
       - DATABASE_URL=${DATABASE_URL}

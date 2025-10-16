@@ -47,7 +47,8 @@ class PostgresStorage:
                 "timestamp": float # Unix timestamp
             }
         ],
-        "today_date": str         # ISO date "YYYY-MM-DD"
+        "today_date": str,        # ISO date "YYYY-MM-DD"
+        "backstory": str          # Compressed backstory (bullet points)
     }
     """
 
@@ -79,6 +80,9 @@ class PostgresStorage:
     ) -> bool:
         """Check if agent state exists for this character-player pair"""
         try:
+            # Normalize address to lowercase (addresses are stored lowercase)
+            player_address_normalized = player_address.lower()
+
             async with self.pool.acquire() as conn:
                 result = await conn.fetchval(
                     """
@@ -88,7 +92,7 @@ class PostgresStorage:
                     )
                     """,
                     character_id,
-                    player_address
+                    player_address_normalized
                 )
                 return result
         except Exception as e:
@@ -104,6 +108,9 @@ class PostgresStorage:
     ) -> Optional[Dict[str, Any]]:
         """Load complete agent state from database"""
         try:
+            # Normalize address to lowercase (addresses are stored lowercase)
+            player_address_normalized = player_address.lower()
+
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """
@@ -127,26 +134,34 @@ class PostgresStorage:
                     WHERE character_id = $1 AND player_address = $2
                     """,
                     character_id,
-                    player_address
+                    player_address_normalized
                 )
 
                 if not row:
                     return None
 
+                # Parse JSONB fields (asyncpg may return them as strings or dicts)
+                def parse_json_field(value):
+                    if value is None:
+                        return None
+                    if isinstance(value, str):
+                        return json.loads(value)
+                    return value
+
                 # Convert row to dict
                 state = {
                     "character_id": row["character_id"],
                     "player_address": row["player_address"],
-                    "player_info": row["player_info"],
+                    "player_info": parse_json_field(row["player_info"]),
                     "player_timezone": row["player_timezone"],
-                    "character_nft": row["character_nft"],
+                    "character_nft": parse_json_field(row["character_nft"]),
                     "backstory": row["backstory"],
                     "relationship_context": row["relationship_context"],
                     "context_message_count": row["context_message_count"],
                     "context_updated_at": row["context_updated_at"],
                     "affection_level": row["affection_level"],
                     "total_messages": row["total_messages"],
-                    "hibernate_data": row["hibernate_data"],
+                    "hibernate_data": parse_json_field(row["hibernate_data"]),
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
                     "hibernated_at": row["hibernated_at"],
@@ -187,6 +202,9 @@ class PostgresStorage:
         Uses UPSERT pattern: INSERT with ON CONFLICT DO UPDATE
         """
         try:
+            # Normalize address to lowercase for consistent storage
+            player_address_normalized = player_address.lower()
+
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -214,7 +232,7 @@ class PostgresStorage:
                         updated_at = NOW()
                     """,
                     character_id,
-                    player_address,
+                    player_address_normalized,
                     json.dumps(player_info),
                     player_info["timezone"],  # Extract timezone for indexing
                     json.dumps(character_nft),
@@ -251,6 +269,9 @@ class PostgresStorage:
         Quick update for frequently changing fields (after each message)
         """
         try:
+            # Normalize address to lowercase
+            player_address_normalized = player_address.lower()
+
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -262,7 +283,7 @@ class PostgresStorage:
                     WHERE character_id = $1 AND player_address = $2
                     """,
                     character_id,
-                    player_address,
+                    player_address_normalized,
                     affection_level,
                     total_messages
                 )
@@ -283,6 +304,9 @@ class PostgresStorage:
     ):
         """Update relationship context (every 50-100 messages)"""
         try:
+            # Normalize address to lowercase
+            player_address_normalized = player_address.lower()
+
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -295,7 +319,7 @@ class PostgresStorage:
                     WHERE character_id = $1 AND player_address = $2
                     """,
                     character_id,
-                    player_address,
+                    player_address_normalized,
                     relationship_context,
                     context_message_count
                 )
@@ -324,6 +348,9 @@ class PostgresStorage:
     ):
         """Save agent state on hibernation"""
         try:
+            # Normalize address to lowercase
+            player_address_normalized = player_address.lower()
+
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -337,7 +364,7 @@ class PostgresStorage:
                     WHERE character_id = $1 AND player_address = $2
                     """,
                     character_id,
-                    player_address,
+                    player_address_normalized,
                     json.dumps(hibernate_data),
                     affection_level,
                     total_messages
@@ -361,6 +388,9 @@ class PostgresStorage:
     ):
         """Clear hibernate_data after agent wakes up"""
         try:
+            # Normalize address to lowercase
+            player_address_normalized = player_address.lower()
+
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -371,7 +401,7 @@ class PostgresStorage:
                     WHERE character_id = $1 AND player_address = $2
                     """,
                     character_id,
-                    player_address
+                    player_address_normalized
                 )
         except Exception as e:
             logger.error(

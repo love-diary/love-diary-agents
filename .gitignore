@@ -68,3 +68,6 @@ dmypy.json
 *.bak
 *.tmp
 .cache/
+
+# Claude Code
+.claude/

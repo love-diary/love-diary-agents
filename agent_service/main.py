@@ -8,7 +8,7 @@ import time
 from fastapi import FastAPI, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import structlog
 
 from .agent_manager import AgentManager
@@ -76,6 +76,13 @@ class HealthResponse(BaseModel):
     hibernated_agents: int
     total_messages_processed: int
     uptime_seconds: int
+
+
+class CharacterInfoResponse(BaseModel):
+    affectionLevel: int
+    backstory: str
+    recentConversation: List[Dict[str, Any]]
+    totalMessages: int
 
 
 # Authentication Dependency
@@ -233,11 +240,107 @@ async def send_message(
         raise HTTPException(500, f"Failed to process message: {str(e)}")
 
 
+@app.get("/agent/{character_id}/info", response_model=CharacterInfoResponse)
+async def get_character_info(
+    character_id: int,
+    player_address: str = Header(None, alias="X-Player-Address"),
+    authenticated: bool = Depends(verify_service_token),
+):
+    """
+    Get character information including affection level, backstory, and recent conversation
+    This is used to populate the character info panel in the chat UI
+    """
+    if not player_address:
+        raise HTTPException(400, "Missing X-Player-Address header")
+
+    logger.info(
+        "character_info_requested",
+        character_id=character_id,
+        player_address=player_address,
+    )
+
+    try:
+        # Load agent state from database (works for both active and hibernated agents)
+        agent_state = await agent_manager.storage.load_agent_state(
+            character_id, player_address
+        )
+
+        if not agent_state:
+            logger.warning(
+                "character_info_not_found",
+                character_id=character_id,
+                player_address=player_address,
+            )
+            raise HTTPException(
+                404, f"Character {character_id} not initialized. Please bond the character first."
+            )
+
+        # Log whether agent is active or hibernated
+        is_active = character_id in agent_manager.active_agents
+        is_hibernated = bool(agent_state.get("hibernate_data"))
+
+        logger.info(
+            "character_info_loading",
+            character_id=character_id,
+            is_active=is_active,
+            is_hibernated=is_hibernated,
+            has_backstory=bool(agent_state.get("backstory")),
+        )
+
+        # Get recent conversation from active agent or hibernate_data
+        recent_conversation = []
+
+        # Check if agent is active in memory
+        if is_active:
+            agent = agent_manager.active_agents[character_id]
+            recent_conversation = agent.state.get("messages_today", [])
+            logger.info("character_info_from_active_agent", character_id=character_id)
+        else:
+            # Get from hibernate_data if available
+            hibernate_data = agent_state.get("hibernate_data") or {}
+            recent_conversation = hibernate_data.get("messages_today", [])
+            logger.info(
+                "character_info_from_hibernated_data",
+                character_id=character_id,
+                messages_count=len(recent_conversation)
+            )
+
+        logger.info(
+            "character_info_retrieved",
+            character_id=character_id,
+            affection_level=agent_state["affection_level"],
+            conversation_messages=len(recent_conversation),
+        )
+
+        return CharacterInfoResponse(
+            affectionLevel=agent_state["affection_level"],
+            backstory=agent_state["backstory"],  # Full backstory for modal display
+            recentConversation=recent_conversation,
+            totalMessages=agent_state["total_messages"],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "character_info_retrieval_failed",
+            character_id=character_id,
+            error=str(e),
+        )
+        raise HTTPException(500, f"Failed to retrieve character info: {str(e)}")
+
+
 # Startup/Shutdown Events
 @app.on_event("startup")
 async def startup_event():
     """Initialize agent manager on startup"""
-    logger.info("service_starting")
+    logger.info(
+        "service_starting",
+        llm_provider=settings.LLM_PROVIDER,
+        asi_api_url=settings.ASI_MINI_API_URL,
+        openai_key_set=bool(settings.OPENAI_API_KEY),
+        asi_key_set=bool(settings.ASI_MINI_API_KEY),
+    )
     await agent_manager.initialize()
     logger.info(
         "service_started",

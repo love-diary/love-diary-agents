@@ -118,6 +118,11 @@ class AgentManager:
 
         # Transform database state to agent state format
         hibernate_data = agent_state.get("hibernate_data") or {}
+
+        # Prefer compressed backstory from hibernate_data (efficient)
+        # Fall back to full backstory from database if not available
+        backstory = hibernate_data.get("backstory", agent_state["backstory"])
+
         transformed_state = {
             "character_id": agent_state["character_id"],
             "player_address": agent_state["player_address"],
@@ -125,7 +130,8 @@ class AgentManager:
             "player_gender": agent_state["player_info"].get("gender"),
             "messages_today": hibernate_data.get("messages_today", []),
             "today_date": hibernate_data.get("today_date"),
-            "backstory": agent_state["backstory"],
+            "backstory": backstory,  # Use compressed if available, full otherwise
+            "backstory_full": agent_state["backstory"],  # Keep full for reference
             "character_data": agent_state["character_nft"],
             "affection_level": agent_state["affection_level"],
             "total_messages": agent_state["total_messages"],
@@ -143,12 +149,23 @@ class AgentManager:
         self.last_activity[character_id] = time.time()
         agent.was_active = False  # Flag: was hibernated
 
+        # Calculate hibernation duration
+        hibernated_at = agent_state.get("hibernated_at")
+        if hibernated_at:
+            # Convert datetime to timestamp if needed
+            if hasattr(hibernated_at, 'timestamp'):
+                hibernated_seconds = int(time.time() - hibernated_at.timestamp())
+            else:
+                hibernated_seconds = 0
+        else:
+            hibernated_seconds = 0
+
         logger.info(
             "agent_woken",
             character_id=character_id,
-            hibernated_for_seconds=int(
-                time.time() - agent_state.get("hibernated_at", time.time())
-            ),
+            hibernated_for_seconds=hibernated_seconds,
+            backstory_source="compressed" if hibernate_data.get("backstory") else "full",
+            backstory_length=len(backstory),
         )
 
         return agent
@@ -187,7 +204,8 @@ class AgentManager:
         )
 
         # Generate backstory (takes 2-5 seconds)
-        backstory = await agent.generate_backstory()
+        # Returns full version for display, stores compressed in state
+        backstory_full = await agent.generate_backstory()
 
         # Prepare player_info dict
         player_info = {
@@ -197,12 +215,14 @@ class AgentManager:
         }
 
         # Save initial state to database
+        # Note: Save FULL backstory to database for permanent archive
+        # Compressed version is in agent.state["backstory"] for chat usage
         await self.storage.save_agent_state(
             character_id=character_id,
             player_address=player_address,
             player_info=player_info,
             character_nft=character_data,
-            backstory=backstory,
+            backstory=backstory_full,  # Save full version to database
             affection_level=agent.state["affection_level"],
             total_messages=agent.state["total_messages"],
         )
@@ -214,15 +234,29 @@ class AgentManager:
         logger.info(
             "agent_created",
             character_id=character_id,
-            backstory_length=len(backstory),
+            backstory_length=len(backstory_full),
+            compressed_backstory_length=len(agent.state["backstory"]),
         )
 
-        # Generate first greeting message
-        first_message = agent.get_greeting()
+        # Generate first greeting message using LLM (also saves to messages_today)
+        first_message = await agent.generate_greeting()
+
+        # Update database with initial message in hibernate_data
+        await self.storage.save_hibernation_state(
+            character_id=character_id,
+            player_address=player_address,
+            hibernate_data={
+                "messages_today": agent.state["messages_today"],
+                "today_date": agent.state["today_date"],
+                "backstory": agent.state["backstory"],  # Compressed
+            },
+            affection_level=agent.state["affection_level"],
+            total_messages=agent.state["total_messages"],
+        )
 
         return {
             "first_message": first_message,
-            "backstory": backstory,
+            "backstory": backstory_full,  # Return full version for display
             "agent_address": f"agent://character_{character_id}",
         }
 
@@ -277,9 +311,11 @@ class AgentManager:
             state = agent.get_state()
 
             # Prepare hibernate_data
+            # Include compressed backstory so we don't need to re-compress on wake
             hibernate_data = {
                 "messages_today": state.get("messages_today", []),
                 "today_date": state.get("today_date"),
+                "backstory": state.get("backstory"),  # Compressed version
             }
 
             # Save hibernation state to database
