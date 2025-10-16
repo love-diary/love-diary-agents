@@ -344,7 +344,8 @@ class PostgresStorage:
         player_address: str,
         hibernate_data: Dict[str, Any],
         affection_level: int,
-        total_messages: int
+        total_messages: int,
+        player_info: Optional[Dict[str, Any]] = None
     ):
         """Save agent state on hibernation"""
         try:
@@ -352,27 +353,51 @@ class PostgresStorage:
             player_address_normalized = player_address.lower()
 
             async with self.pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    UPDATE agent_states
-                    SET
-                        hibernate_data = $3,
-                        affection_level = $4,
-                        total_messages = $5,
-                        hibernated_at = NOW(),
-                        updated_at = NOW()
-                    WHERE character_id = $1 AND player_address = $2
-                    """,
-                    character_id,
-                    player_address_normalized,
-                    json.dumps(hibernate_data),
-                    affection_level,
-                    total_messages
-                )
+                if player_info:
+                    # Update player_info if provided
+                    await conn.execute(
+                        """
+                        UPDATE agent_states
+                        SET
+                            player_info = $3,
+                            hibernate_data = $4,
+                            affection_level = $5,
+                            total_messages = $6,
+                            hibernated_at = NOW(),
+                            updated_at = NOW()
+                        WHERE character_id = $1 AND player_address = $2
+                        """,
+                        character_id,
+                        player_address_normalized,
+                        json.dumps(player_info),
+                        json.dumps(hibernate_data),
+                        affection_level,
+                        total_messages
+                    )
+                else:
+                    # Don't update player_info
+                    await conn.execute(
+                        """
+                        UPDATE agent_states
+                        SET
+                            hibernate_data = $3,
+                            affection_level = $4,
+                            total_messages = $5,
+                            hibernated_at = NOW(),
+                            updated_at = NOW()
+                        WHERE character_id = $1 AND player_address = $2
+                        """,
+                        character_id,
+                        player_address_normalized,
+                        json.dumps(hibernate_data),
+                        affection_level,
+                        total_messages
+                    )
 
                 logger.info(
                     "hibernation_state_saved",
-                    character_id=character_id
+                    character_id=character_id,
+                    player_info_updated=player_info is not None
                 )
 
         except Exception as e:

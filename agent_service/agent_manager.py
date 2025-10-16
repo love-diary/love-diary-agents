@@ -129,16 +129,20 @@ class AgentManager:
             "player_name": agent_state["player_info"].get("name"),
             "player_gender": agent_state["player_info"].get("gender"),
             "messages_today": hibernate_data.get("messages_today", []),
+            "messages_for_compression": hibernate_data.get("messages_for_compression", []),
             "today_date": hibernate_data.get("today_date"),
             "backstory": backstory,  # Use compressed if available, full otherwise
             "backstory_full": agent_state["backstory"],  # Keep full for reference
             "character_data": agent_state["character_nft"],
             "affection_level": agent_state["affection_level"],
             "total_messages": agent_state["total_messages"],
+            "conversation_summary": hibernate_data.get("conversation_summary", ""),
+            "last_compression_at": hibernate_data.get("last_compression_at", 0.0),
+            "pending_affection_delta": hibernate_data.get("pending_affection_delta", 0),
         }
 
-        # Create agent instance
-        agent = CharacterAgent(character_id)
+        # Create agent instance with shared storage
+        agent = CharacterAgent(character_id, storage=self.storage)
         await agent.restore_state(transformed_state)
 
         # Clear hibernate_data in database (agent is now active)
@@ -194,8 +198,8 @@ class AgentManager:
         # Fetch character data from blockchain
         character_data = await self.blockchain.get_character_data(character_id)
 
-        # Create agent
-        agent = CharacterAgent(character_id)
+        # Create agent with shared storage
+        agent = CharacterAgent(character_id, storage=self.storage)
         await agent.initialize(
             character_data=character_data,
             player_address=player_address,
@@ -247,10 +251,14 @@ class AgentManager:
             player_address=player_address,
             hibernate_data={
                 "messages_today": agent.state["messages_today"],
+                "messages_for_compression": agent.state["messages_for_compression"],
                 "today_date": agent.state["today_date"],
                 "backstory": agent.state["backstory"],  # Compressed
+                "conversation_summary": agent.state.get("conversation_summary", ""),
+                "last_compression_at": agent.state.get("last_compression_at", 0.0),
+                "pending_affection_delta": agent.state.get("pending_affection_delta", 0),
             },
-            affection_level=agent.state["affection_level"],
+            affection_level=agent.state["affection_level"],  # Will be 10 initially
             total_messages=agent.state["total_messages"],
         )
 
@@ -311,20 +319,32 @@ class AgentManager:
             state = agent.get_state()
 
             # Prepare hibernate_data
-            # Include compressed backstory so we don't need to re-compress on wake
+            # Include compressed backstory and conversation summary
             hibernate_data = {
                 "messages_today": state.get("messages_today", []),
+                "messages_for_compression": state.get("messages_for_compression", []),
                 "today_date": state.get("today_date"),
                 "backstory": state.get("backstory"),  # Compressed version
+                "conversation_summary": state.get("conversation_summary", ""),
+                "last_compression_at": state.get("last_compression_at", 0.0),
+                "pending_affection_delta": state.get("pending_affection_delta", 0),
             }
 
-            # Save hibernation state to database
+            # Prepare updated player_info
+            player_info = {
+                "name": state.get("player_name"),
+                "gender": state.get("player_gender"),
+                "timezone": 0,  # TODO: Get from frontend
+            }
+
+            # Save hibernation state to database (includes player_info update)
             await self.storage.save_hibernation_state(
                 character_id=character_id,
                 player_address=agent.player_address,
                 hibernate_data=hibernate_data,
                 affection_level=state.get("affection_level", 0),
                 total_messages=state.get("total_messages", 0),
+                player_info=player_info,  # Update player info
             )
 
             # Remove from memory

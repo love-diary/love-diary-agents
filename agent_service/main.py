@@ -5,7 +5,7 @@ FastAPI server for managing character agents
 
 import os
 import time
-from fastapi import FastAPI, Header, HTTPException, Depends
+from fastapi import FastAPI, Header, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
@@ -83,6 +83,8 @@ class CharacterInfoResponse(BaseModel):
     backstory: str
     recentConversation: List[Dict[str, Any]]
     totalMessages: int
+    playerName: str
+    playerGender: str
 
 
 # Authentication Dependency
@@ -184,12 +186,14 @@ async def create_agent(
 async def send_message(
     character_id: int,
     request: SendMessageRequest,
+    background_tasks: BackgroundTasks,
     player_address: str = Header(None, alias="X-Player-Address"),
     authenticated: bool = Depends(verify_service_token),
 ):
     """
     Send a message to a character agent
     Agent will be woken from hibernation if needed
+    Compression runs as background task after response is sent
     """
     service_stats["total_requests"] += 1
     service_stats["total_messages"] += 1
@@ -210,7 +214,7 @@ async def send_message(
             character_id, player_address
         )
 
-        # Process message
+        # Process message (fast - no compression blocking)
         response = await agent.process_message(
             player_address=player_address,
             player_name=request.playerName,
@@ -224,6 +228,15 @@ async def send_message(
             affection_change=response["affection_change"],
         )
 
+        # Schedule compression as background task if needed
+        if response.get("should_compress", False):
+            logger.info(
+                "scheduling_background_compression",
+                character_id=character_id,
+            )
+            background_tasks.add_task(agent.compress_and_update_affection)
+
+        # Return response immediately (compression runs after this)
         return SendMessageResponse(
             response=response["text"],
             timestamp=int(time.time()),
@@ -312,11 +325,16 @@ async def get_character_info(
             conversation_messages=len(recent_conversation),
         )
 
+        # Get player info from database
+        player_info = agent_state.get("player_info") or {}
+
         return CharacterInfoResponse(
             affectionLevel=agent_state["affection_level"],
             backstory=agent_state["backstory"],  # Full backstory for modal display
             recentConversation=recent_conversation,
             totalMessages=agent_state["total_messages"],
+            playerName=player_info.get("name", "Player"),
+            playerGender=player_info.get("gender", "Male"),
         )
 
     except HTTPException:
