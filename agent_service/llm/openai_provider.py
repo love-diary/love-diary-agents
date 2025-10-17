@@ -192,6 +192,46 @@ class OpenAIProvider(LLMProvider):
             logger.error("openai_chat_failed", error=str(e))
             raise
 
+    async def get_embedding(self, text: str) -> List[float]:
+        """
+        Generate embedding vector using OpenAI text-embedding-3-small
+
+        Args:
+            text: Text to embed
+
+        Returns:
+            List of floats representing the embedding vector (1536 dimensions)
+        """
+        try:
+            logger.info(
+                "openai_embedding_request",
+                text_length=len(text),
+                text_preview=text[:100],
+            )
+
+            response = await litellm.aembedding(
+                model="text-embedding-3-small",
+                input=text,
+                timeout=10.0,
+            )
+
+            # Extract embedding vector (first result)
+            embedding = response.data[0]["embedding"]
+
+            logger.info(
+                "openai_embedding_response",
+                embedding_dimension=len(embedding),
+            )
+
+            return embedding
+
+        except litellm.exceptions.Timeout:
+            logger.error("openai_embedding_timeout")
+            raise Exception("OpenAI embedding API timeout (>10s)")
+        except Exception as e:
+            logger.error("openai_embedding_failed", error=str(e))
+            raise
+
     async def close(self):
         """Close HTTP client (LiteLLM handles cleanup internally)"""
         logger.info("openai_provider_closed")

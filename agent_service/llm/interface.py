@@ -65,6 +65,19 @@ class LLMProvider(ABC):
         pass
 
     @abstractmethod
+    async def get_embedding(self, text: str) -> List[float]:
+        """
+        Generate embedding vector for text
+
+        Args:
+            text: Text to embed
+
+        Returns:
+            List of floats representing the embedding vector
+        """
+        pass
+
+    @abstractmethod
     async def close(self):
         """Close HTTP client and cleanup resources"""
         pass

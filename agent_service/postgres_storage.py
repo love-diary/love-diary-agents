@@ -453,7 +453,7 @@ class PostgresStorage:
             return 0
 
     # ========================================================================
-    # Diary Methods (Stubs for now - will implement when diary table is ready)
+    # Diary Methods - For character diary entries with vector search
     # ========================================================================
 
     async def save_diary_entry(
@@ -462,17 +462,274 @@ class PostgresStorage:
         player_address: str,
         date: str,
         entry: str,
+        embedding: list,
         message_count: int
     ):
-        """Save daily diary entry (stub - table not created yet)"""
-        logger.info(
-            "diary_entry_saved_stub",
-            character_id=character_id,
-            date=date,
-            entry_length=len(entry)
-        )
-        # TODO: Implement when diary_entries table is created
-        pass
+        """
+        Save daily diary entry with vector embedding
+
+        Args:
+            character_id: Character NFT token ID
+            player_address: Player's wallet address
+            date: Date string in YYYY-MM-DD format
+            entry: Diary entry text
+            embedding: Vector embedding (1536 dimensions)
+            message_count: Number of messages in conversation
+        """
+        try:
+            # Normalize address to lowercase
+            player_address_normalized = player_address.lower()
+
+            # Convert date string to datetime.date object for PostgreSQL
+            from datetime import datetime
+            date_obj = datetime.strptime(date, "%Y-%m-%d").date()
+
+            # Convert embedding list to string format for PostgreSQL vector type
+            # pgvector expects format: "[0.1, 0.2, 0.3, ...]"
+            embedding_str = str(embedding)
+
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO diary_entries (
+                        character_id,
+                        player_address,
+                        date,
+                        entry_text,
+                        embedding,
+                        message_count
+                    ) VALUES ($1, $2, $3, $4, $5::vector, $6)
+                    ON CONFLICT (character_id, player_address, date)
+                    DO UPDATE SET
+                        entry_text = EXCLUDED.entry_text,
+                        embedding = EXCLUDED.embedding,
+                        message_count = EXCLUDED.message_count,
+                        created_at = NOW()
+                    """,
+                    character_id,
+                    player_address_normalized,
+                    date_obj,  # Pass datetime.date object, not string
+                    entry,
+                    embedding_str,  # Pass string representation of vector
+                    message_count
+                )
+
+                logger.info(
+                    "diary_entry_saved",
+                    character_id=character_id,
+                    date=date,
+                    entry_length=len(entry),
+                    message_count=message_count,
+                    entry=entry
+                )
+
+        except Exception as e:
+            logger.error(
+                "diary_entry_save_failed",
+                character_id=character_id,
+                date=date,
+                error=str(e)
+            )
+            raise
+
+    async def get_diary_list(
+        self,
+        character_id: int,
+        player_address: str
+    ) -> list:
+        """
+        Get list of all diary entries for this character-player pair
+
+        Args:
+            character_id: Character NFT token ID
+            player_address: Player's wallet address
+
+        Returns:
+            List of dicts with {date, message_count}, sorted by date DESC
+        """
+        try:
+            # Normalize address to lowercase
+            player_address_normalized = player_address.lower()
+
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT date, message_count
+                    FROM diary_entries
+                    WHERE character_id = $1 AND player_address = $2
+                    ORDER BY date DESC
+                    """,
+                    character_id,
+                    player_address_normalized
+                )
+
+                diary_list = [
+                    {
+                        "date": row["date"].isoformat(),
+                        "message_count": row["message_count"]
+                    }
+                    for row in rows
+                ]
+
+                logger.info(
+                    "diary_list_retrieved",
+                    character_id=character_id,
+                    count=len(diary_list)
+                )
+
+                return diary_list
+
+        except Exception as e:
+            logger.error(
+                "diary_list_retrieval_failed",
+                character_id=character_id,
+                error=str(e)
+            )
+            return []
+
+    async def get_diary_entry(
+        self,
+        character_id: int,
+        player_address: str,
+        date: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get specific diary entry
+
+        Args:
+            character_id: Character NFT token ID
+            player_address: Player's wallet address
+            date: Date string in YYYY-MM-DD format
+
+        Returns:
+            Dict with {date, entry, message_count} or None if not found
+        """
+        try:
+            # Normalize address to lowercase
+            player_address_normalized = player_address.lower()
+
+            # Convert date string to datetime.date object for PostgreSQL query
+            from datetime import datetime
+            date_obj = datetime.strptime(date, "%Y-%m-%d").date()
+
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT date, entry_text, message_count
+                    FROM diary_entries
+                    WHERE character_id = $1 AND player_address = $2 AND date = $3
+                    """,
+                    character_id,
+                    player_address_normalized,
+                    date_obj  # Pass datetime.date object, not string
+                )
+
+                if not row:
+                    logger.warning(
+                        "diary_entry_not_found",
+                        character_id=character_id,
+                        date=date
+                    )
+                    return None
+
+                diary_entry = {
+                    "date": row["date"].isoformat(),
+                    "entry": row["entry_text"],
+                    "message_count": row["message_count"]
+                }
+
+                logger.info(
+                    "diary_entry_retrieved",
+                    character_id=character_id,
+                    date=date,
+                    entry_length=len(row["entry_text"])
+                )
+
+                return diary_entry
+
+        except Exception as e:
+            logger.error(
+                "diary_entry_retrieval_failed",
+                character_id=character_id,
+                date=date,
+                error=str(e)
+            )
+            return None
+
+    async def search_diary_entries(
+        self,
+        character_id: int,
+        query_embedding: list,
+        limit: int = 3
+    ) -> list:
+        """
+        Search ALL diary entries for a character using vector similarity
+
+        IMPORTANT: This searches across ALL player_addresses to give the agent
+        full memory context from all previous owners. The character should remember
+        everything from its entire history, not just current owner.
+
+        Args:
+            character_id: Character NFT token ID
+            query_embedding: Query vector embedding (1536 dimensions)
+            limit: Maximum number of results to return
+
+        Returns:
+            List of dicts with {date, entry, message_count, similarity}
+        """
+        try:
+            # Convert embedding list to string format for PostgreSQL vector type
+            query_embedding_str = str(query_embedding)
+
+            async with self.pool.acquire() as conn:
+                # Use cosine distance operator <=> for similarity search
+                # Lower distance = higher similarity
+                # NOTE: No player_address filter - search ALL diaries for full memory
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                        date,
+                        entry_text,
+                        message_count,
+                        (embedding <=> $2::vector) as distance
+                    FROM diary_entries
+                    WHERE character_id = $1
+                    ORDER BY embedding <=> $2::vector
+                    LIMIT $3
+                    """,
+                    character_id,
+                    query_embedding_str,
+                    limit
+                )
+
+                results = []
+                for row in rows:
+                    # Convert distance to similarity score (0-1, higher is better)
+                    similarity = 1 - float(row["distance"])
+
+                    results.append({
+                        "date": row["date"].isoformat(),
+                        "entry": row["entry_text"],
+                        "message_count": row["message_count"],
+                        "similarity": similarity
+                    })
+
+                logger.info(
+                    "diary_search_completed",
+                    character_id=character_id,
+                    results_count=len(results),
+                    search_scope="all_owners"
+                )
+
+                return results
+
+        except Exception as e:
+            logger.error(
+                "diary_search_failed",
+                character_id=character_id,
+                error=str(e)
+            )
+            return []
 
     async def search_memories(
         self,
@@ -481,13 +738,20 @@ class PostgresStorage:
         query: str,
         limit: int = 3
     ) -> list:
-        """Search diary entries (stub - will implement with pgvector)"""
-        logger.info(
-            "memory_search_stub",
+        """
+        Search diary entries (legacy method name for compatibility)
+        This is a wrapper around search_diary_entries that generates embedding
+
+        Note: This method is kept for backward compatibility but requires
+        an LLM provider to generate embeddings, which storage layer shouldn't have.
+        Consider using search_diary_entries directly with pre-computed embeddings.
+        """
+        logger.warning(
+            "search_memories_deprecated",
             character_id=character_id,
-            query_length=len(query)
+            message="Use search_diary_entries with pre-computed embeddings instead"
         )
-        # TODO: Implement when diary_entries table is created with pgvector
+        # Return empty list - caller should use search_diary_entries
         return []
 
     async def save_character_profile(

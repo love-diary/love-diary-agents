@@ -128,6 +128,11 @@ class CharacterAgent:
             "conversation_summary": "",  # Compressed conversation history
             "last_compression_at": 0.0,  # Timestamp of last compression
             "pending_affection_delta": 0,  # Affection change from background compression
+            "pending_diary_messages": [],  # Yesterday's messages waiting for diary generation
+            "pending_diary_summary": "",  # Compressed conversation summary for diary
+            "pending_diary_date": None,  # Date for pending diary
+            "pending_diary_message_count": 0,  # Total message count for pending diary
+            "messages_today_count": 0,  # Running count of messages today (resets at midnight)
         }
 
     async def initialize(
@@ -136,17 +141,29 @@ class CharacterAgent:
         player_address: str,
         player_name: str,
         player_gender: str,
+        player_timezone: int = 0,
     ):
         """Initialize new agent with character and player data"""
         self.player_address = player_address
+
+        # Store player_info for timezone access
+        player_info = {
+            "name": player_name,
+            "gender": player_gender,
+            "timezone": player_timezone,
+        }
+
+        # Get today's date in player's timezone
+        today_date = self._get_player_date(player_timezone)
 
         self.state.update(
             {
                 "player_address": player_address,
                 "player_name": player_name,
                 "player_gender": player_gender,
+                "player_info": player_info,
                 "character_data": character_data,
-                "today_date": time.strftime("%Y-%m-%d"),
+                "today_date": today_date,
                 "messages_today": [],
                 "created_at": time.time(),
             }
@@ -355,6 +372,22 @@ class CharacterAgent:
             # Fallback: no affection change if parsing fails
             return 0
 
+    def _get_player_date(self, player_timezone: int) -> str:
+        """
+        Get current date in player's timezone
+
+        Args:
+            player_timezone: UTC offset in hours (-12 to +14)
+
+        Returns:
+            Date string in YYYY-MM-DD format in player's timezone
+        """
+        from datetime import datetime, timedelta
+
+        utc_now = datetime.utcnow()
+        player_now = utc_now + timedelta(hours=player_timezone)
+        return player_now.strftime("%Y-%m-%d")
+
     async def process_message(
         self, player_address: str, player_name: str, message: str
     ) -> Dict[str, Any]:
@@ -366,15 +399,40 @@ class CharacterAgent:
             # Update player context
             self.state["player_name"] = player_name
 
-            # Check if new day - trigger diary save
-            today = time.strftime("%Y-%m-%d")
-            if self.state["today_date"] != today:
-                await self._save_daily_diary()
+            # Check if new day - save yesterday's messages for diary generation
+            # NOTE: Diary generation is handled by cron scheduler at midnight
+            player_timezone = self.state.get("player_info", {}).get("timezone", 0)
+            today = self._get_player_date(player_timezone)
+
+            if self.state["today_date"] != today and self.state["today_date"] is not None:
+                # Date changed - save yesterday's data for diary generation
+                old_date = self.state["today_date"]
+
+                # Save compressed summary + recent messages for efficient diary generation
+                # This captures the FULL day: compressed earlier messages + uncompressed recent
+                self.state["pending_diary_summary"] = self.state.get("conversation_summary", "")
+                self.state["pending_diary_messages"] = self.state["messages_for_compression"].copy()
+                self.state["pending_diary_date"] = old_date
+                self.state["pending_diary_message_count"] = self.state.get("messages_today_count", 0)
+
+                logger.info(
+                    "date_changed_detected",
+                    character_id=self.character_id,
+                    old_date=old_date,
+                    new_date=today,
+                    pending_summary_length=len(self.state["pending_diary_summary"]),
+                    pending_messages=len(self.state["pending_diary_messages"]),
+                    pending_message_count=self.state["pending_diary_message_count"],
+                    note="Summary + messages + count saved for cron scheduler diary generation"
+                )
+
+                # Start fresh for new day
                 self.state["today_date"] = today
                 self.state["messages_today"] = []
-                self.state["messages_for_compression"] = []  # Clear compression list too
-                self.state["conversation_summary"] = ""  # Reset summary for new day
-                self.state["pending_affection_delta"] = 0  # Reset pending affection
+                self.state["messages_for_compression"] = []
+                self.state["conversation_summary"] = ""
+                self.state["pending_affection_delta"] = 0
+                self.state["messages_today_count"] = 0  # Reset daily message counter
 
             # STEP 1: Apply pending affection from previous background compression
             affection_from_compression = self.state.get("pending_affection_delta", 0)
@@ -412,14 +470,36 @@ class CharacterAgent:
                 self.state["messages_today"].pop(0)  # Remove oldest
 
             self.state["total_messages"] += 1
+            self.state["messages_today_count"] += 1  # Increment daily counter
 
-            # STEP 3: Retrieve relevant memories from database
-            relevant_memories = await self.storage.search_memories(
-                character_id=self.character_id,
-                player_address=player_address,
-                query=message,
-                limit=3,
-            )
+            # STEP 3: Retrieve relevant memories from database using vector search
+            # NOTE: Searches ALL diaries (across all owners) for full character memory
+            relevant_memories = []
+            try:
+                # Generate embedding for the query
+                query_embedding = await self.llm.get_embedding(message)
+
+                # Search diary entries using vector similarity (searches ALL owners)
+                relevant_memories = await self.storage.search_diary_entries(
+                    character_id=self.character_id,
+                    query_embedding=query_embedding,
+                    limit=2  # Get top 2 most relevant diary entries
+                )
+
+                logger.info(
+                    "diary_search_in_chat",
+                    character_id=self.character_id,
+                    memories_found=len(relevant_memories),
+                    search_scope="all_owners"
+                )
+            except Exception as e:
+                logger.error(
+                    "diary_search_in_chat_failed",
+                    character_id=self.character_id,
+                    error=str(e)
+                )
+                # Continue without memories if search fails
+                relevant_memories = []
 
             # STEP 4: Build prompts
             system_prompt = self._build_system_prompt()
@@ -457,6 +537,8 @@ class CharacterAgent:
             # Maintain rolling window for messages_today (max 15)
             if len(self.state["messages_today"]) > 15:
                 self.state["messages_today"].pop(0)  # Remove oldest
+
+            self.state["messages_today_count"] += 1  # Increment daily counter
 
             logger.info(
                 "message_processed",
@@ -498,60 +580,119 @@ class CharacterAgent:
         )
 
     def _build_context_prompt(self, memories: List[Dict]) -> str:
-        """Build context from recent messages and relevant memories"""
+        """Build context from recent messages and relevant diary memories"""
         context = ""
 
         # Add conversation summary if available
         if self.state.get("conversation_summary"):
             context += f"## Previous conversation summary:\n{self.state['conversation_summary']}\n\n"
 
-        # Add recent messages and memories
+        # Add relevant diary entries if available
+        if memories:
+            context += "## Relevant past memories from your diary:\n"
+            for mem in memories:
+                # Show date and entry preview
+                entry_preview = mem.get("entry", "")
+                if len(entry_preview) > 200:
+                    entry_preview = entry_preview[:200] + "..."
+                context += f"- {mem.get('date')}: {entry_preview}\n"
+            context += "\n"
+
+        # Add recent messages
         context += prompts.build_context_prompt(
             recent_messages=self.state["messages_today"],
             player_name=self.state["player_name"],
-            memories=memories,
+            memories=[],  # We already handled memories above
         )
 
         return context
 
     async def _save_daily_diary(self):
-        """Save today's conversation as diary entry"""
-        if not self.state["messages_today"]:
+        """
+        Save diary entry with vector embedding
+
+        Uses pending_diary_summary + pending_diary_messages + pending_diary_date
+        which are set when date changes or when scheduler runs at midnight.
+
+        This design captures the FULL day efficiently:
+        - Compressed summary: Earlier conversations (compressed during the day)
+        - Recent messages: Final uncompressed messages (< 15 messages)
+        """
+        # Check for pending diary data
+        summary = self.state.get("pending_diary_summary", "")
+        messages = self.state.get("pending_diary_messages", [])
+        diary_date = self.state.get("pending_diary_date")
+        message_count = self.state.get("pending_diary_message_count", 0)
+
+        # Need at least some data (summary OR messages) and a date
+        if (not summary and not messages) or not diary_date:
+            logger.info(
+                "diary_skipped_no_pending_data",
+                character_id=self.character_id,
+                has_summary=bool(summary),
+                has_messages=bool(messages),
+                has_date=bool(diary_date)
+            )
             return
 
         logger.info(
             "diary_save_started",
             character_id=self.character_id,
-            message_count=len(self.state["messages_today"]),
+            date=diary_date,
+            summary_length=len(summary),
+            message_count=message_count,
+            note="Using compressed summary + recent messages for full day coverage"
         )
 
-        # Build prompt using template
+        # Build prompt using BOTH summary and messages for full day coverage
         char = self.state["character_data"]
         prompt = prompts.build_diary_prompt(
             character_name=char["name"],
             player_name=self.state["player_name"],
-            conversation_messages=self.state["messages_today"],
+            date=diary_date,  # Pass the actual date being summarized
+            conversation_summary=summary,
+            recent_messages=messages,
         )
 
+        # Generate diary text
         diary_response = await self.llm.complete(
             prompt=prompt, reasoning_mode="Complete", max_tokens=400
         )
 
         diary_entry = diary_response["text"]
 
-        # Save to database
+        # Generate embedding for semantic search
+        logger.info(
+            "diary_embedding_generating",
+            character_id=self.character_id,
+            entry_length=len(diary_entry)
+        )
+
+        embedding = await self.llm.get_embedding(diary_entry)
+
+        # Save to database with embedding (use actual count, not len(messages))
         await self.storage.save_diary_entry(
             character_id=self.character_id,
             player_address=self.state["player_address"],
-            date=self.state["today_date"],
+            date=diary_date,
             entry=diary_entry,
-            message_count=len(self.state["messages_today"]),
+            embedding=embedding,
+            message_count=message_count,  # Use tracked count, not len(pending_messages)
         )
+
+        # Clear pending diary data after successful generation
+        self.state["pending_diary_messages"] = []
+        self.state["pending_diary_summary"] = ""
+        self.state["pending_diary_date"] = None
+        self.state["pending_diary_message_count"] = 0
 
         logger.info(
             "diary_saved",
             character_id=self.character_id,
+            date=diary_date,
             entry_length=len(diary_entry),
+            embedding_dimension=len(embedding),
+            entry=diary_entry
         )
 
 
@@ -594,6 +735,7 @@ class CharacterAgent:
         }
         self.state["messages_today"].append(greeting_msg)
         self.state["messages_for_compression"].append(greeting_msg)
+        self.state["messages_today_count"] += 1  # Count greeting message
 
         return greeting_message
 

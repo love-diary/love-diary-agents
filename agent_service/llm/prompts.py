@@ -161,33 +161,59 @@ def build_context_prompt(
 def build_diary_prompt(
     character_name: str,
     player_name: str,
-    conversation_messages: List[Dict[str, str]],
+    date: str,
+    conversation_summary: str,
+    recent_messages: List[Dict[str, str]],
 ) -> str:
     """
-    Generate prompt for daily diary summarization
+    Generate prompt for daily diary summarization using compressed + recent messages
 
     Args:
         character_name: Character's name
         player_name: Player's name
-        conversation_messages: List of messages from today with 'sender' and 'text'
+        date: Date string in YYYY-MM-DD format (the date being summarized)
+        conversation_summary: Compressed summary of earlier conversations today
+        recent_messages: Recent uncompressed messages from today
 
     Returns:
         Formatted diary summarization prompt
     """
-    # Format conversation for prompt
-    conversation_text = ""
-    for msg in conversation_messages:
-        sender = "I" if msg["sender"] == "character" else player_name
-        conversation_text += f"{sender}: {msg['text']}\n"
+    # Build context from both compressed summary and recent messages
+    context = ""
 
-    return f"""Summarize today's conversation from {character_name}'s perspective.
-Write a first-person diary entry (200-300 words).
+    # Add compressed summary if available (captures earlier part of day)
+    if conversation_summary:
+        context += f"Earlier today (summary):\n{conversation_summary}\n\n"
 
-Conversation:
-{conversation_text}
+    # Add recent uncompressed messages (captures recent detail)
+    if recent_messages:
+        context += "Recent conversation (detailed):\n"
+        for msg in recent_messages:
+            sender = "I" if msg["sender"] == "character" else player_name
+            context += f"{sender}: {msg['text']}\n"
+
+    # If neither are available, note it
+    if not conversation_summary and not recent_messages:
+        context = "[No messages today]"
+
+    return f"""Summarize the full conversation from {character_name}'s perspective for {date}.
+Write a first-person diary entry (200-300 words) capturing the ENTIRE day.
+
+Date: {date}
+
+Today's conversation:
+{context}
 
 Write as {character_name}, capturing emotions, thoughts, and feelings about the conversation with {player_name}.
-Focus on what felt meaningful, any growing connection, and your inner thoughts."""
+Focus on:
+- What felt meaningful throughout the day
+- Any growing connection or emotional shifts
+- Your inner thoughts and reactions
+- The arc of the conversation from beginning to end
+
+IMPORTANT: Write ONLY the diary content. Do NOT include any headers, labels, or formatting like "Diary Entry:" or "Dear Diary:". Start directly with the first-person narrative.
+
+Remember: You're summarizing the FULL day, not just the recent messages."""
 
 
 def build_backstory_summary_prompt(

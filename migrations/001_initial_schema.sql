@@ -62,6 +62,57 @@ CREATE INDEX IF NOT EXISTS idx_agent_states_timezone
     ON agent_states(player_timezone);
 
 -- ============================================================================
+-- Diary Entries Table
+-- Stores daily diary entries for each character-player relationship
+-- ============================================================================
+
+-- Enable pgvector extension for vector similarity search
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Diary Entries Table
+CREATE TABLE IF NOT EXISTS diary_entries (
+    -- Primary Key
+    id SERIAL PRIMARY KEY,
+
+    -- Foreign Keys
+    character_id INTEGER NOT NULL,
+    player_address TEXT NOT NULL,
+
+    -- Diary Data
+    date DATE NOT NULL,
+    entry_text TEXT NOT NULL,
+    message_count INTEGER DEFAULT 0,
+
+    -- Vector Embedding for Semantic Search
+    -- Using 1536 dimensions for OpenAI text-embedding-3-small
+    embedding vector(1536),
+
+    -- Metadata
+    created_at TIMESTAMP DEFAULT NOW(),
+
+    -- Ensure one diary per character-player-date
+    UNIQUE(character_id, player_address, date)
+);
+
+-- Index for finding diaries by character-player pair
+CREATE INDEX IF NOT EXISTS idx_diary_character_player
+    ON diary_entries(character_id, player_address);
+
+-- Index for finding ALL diaries by character (for agent full memory)
+CREATE INDEX IF NOT EXISTS idx_diary_character
+    ON diary_entries(character_id, date DESC);
+
+-- Index for sorting diaries by date (most recent first)
+CREATE INDEX IF NOT EXISTS idx_diary_date
+    ON diary_entries(character_id, player_address, date DESC);
+
+-- Vector index for cosine similarity search
+-- IVFFlat index with 100 lists (good for 10K-1M vectors)
+CREATE INDEX IF NOT EXISTS idx_diary_embedding
+    ON diary_entries USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+
+-- ============================================================================
 -- Migration Tracking Table (optional, for future migrations)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS schema_migrations (

@@ -180,6 +180,7 @@ class AgentManager:
         player_address: str,
         player_name: str,
         player_gender: str,
+        player_timezone: int = 0,
     ) -> Dict:
         """
         Create a new agent from scratch with backstory generation
@@ -189,6 +190,7 @@ class AgentManager:
             player_address: Player's wallet address
             player_name: Player's name
             player_gender: Player's gender
+            player_timezone: Player's UTC offset in hours (-12 to +14)
 
         Returns:
             Dict with {first_message, backstory, agent_address}
@@ -205,6 +207,7 @@ class AgentManager:
             player_address=player_address,
             player_name=player_name,
             player_gender=player_gender,
+            player_timezone=player_timezone,
         )
 
         # Generate backstory (takes 2-5 seconds)
@@ -215,7 +218,7 @@ class AgentManager:
         player_info = {
             "name": player_name,
             "gender": player_gender,
-            "timezone": 0,  # TODO: Get from frontend
+            "timezone": player_timezone,
         }
 
         # Save initial state to database
@@ -330,11 +333,17 @@ class AgentManager:
                 "pending_affection_delta": state.get("pending_affection_delta", 0),
             }
 
-            # Prepare updated player_info
+            # Load existing player_info from database to preserve timezone
+            existing_state = await self.storage.load_agent_state(
+                character_id, agent.player_address
+            )
+            existing_timezone = existing_state.get("player_info", {}).get("timezone", 0) if existing_state else 0
+
+            # Prepare updated player_info (preserve timezone)
             player_info = {
                 "name": state.get("player_name"),
                 "gender": state.get("player_gender"),
-                "timezone": 0,  # TODO: Get from frontend
+                "timezone": existing_timezone,
             }
 
             # Save hibernation state to database (includes player_info update)

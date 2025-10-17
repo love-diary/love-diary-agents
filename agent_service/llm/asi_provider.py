@@ -182,6 +182,51 @@ class ASIProvider(LLMProvider):
             logger.error("asi_chat_failed", error=str(e))
             raise
 
+    async def get_embedding(self, text: str) -> List[float]:
+        """
+        Generate embedding vector (fallback to OpenAI)
+
+        ASI-1 Mini doesn't provide embedding endpoint yet,
+        so we fall back to OpenAI's text-embedding-3-small
+
+        Args:
+            text: Text to embed
+
+        Returns:
+            List of floats representing the embedding vector (1536 dimensions)
+        """
+        try:
+            import litellm
+            from ..config import settings
+
+            logger.info(
+                "asi_embedding_fallback_to_openai",
+                text_length=len(text),
+                text_preview=text[:100],
+            )
+
+            # Configure LiteLLM with OpenAI key
+            litellm.api_key = settings.OPENAI_API_KEY
+
+            response = await litellm.aembedding(
+                model="text-embedding-3-small",
+                input=text,
+                timeout=10.0,
+            )
+
+            embedding = response.data[0]["embedding"]
+
+            logger.info(
+                "asi_embedding_response_via_openai",
+                embedding_dimension=len(embedding),
+            )
+
+            return embedding
+
+        except Exception as e:
+            logger.error("asi_embedding_failed", error=str(e))
+            raise Exception(f"Embedding generation failed: {str(e)}")
+
     async def close(self):
         """Close HTTP client"""
         await self.client.aclose()
