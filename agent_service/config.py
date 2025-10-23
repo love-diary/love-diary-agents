@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     # Blockchain
     BASE_RPC_URL: str = "https://sepolia.base.org"
     CHARACTER_NFT_ADDRESS: str
+    LOVE_TOKEN_ADDRESS: str
+
+    # Wallet Management
+    WALLET_ENCRYPTION_KEY: str  # Fernet key for encrypting character wallet private keys
 
     # AI/LLM
     LLM_PROVIDER: str = "asi"  # "asi" or "openai"

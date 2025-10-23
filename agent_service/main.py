@@ -100,6 +100,24 @@ class DiaryEntryResponse(BaseModel):
     messageCount: int
 
 
+class WalletInfoResponse(BaseModel):
+    walletAddress: str
+    loveBalance: int  # LOVE token balance in wei (18 decimals)
+
+
+class GiftRequest(BaseModel):
+    txHash: str = Field(..., min_length=66, max_length=66, pattern="^0x[a-fA-F0-9]{64}$")
+    amount: int = Field(..., ge=100_000_000_000_000_000_000, le=1000_000_000_000_000_000_000)  # 100-1000 LOVE in wei
+
+
+class GiftResponse(BaseModel):
+    status: str  # "success" | "failed"
+    affectionChange: int
+    newAffectionLevel: int
+    message: str
+    characterMessage: Optional[str] = None  # Character's response to gift
+
+
 # Authentication Dependency
 async def verify_service_token(authorization: Optional[str] = Header(None)):
     """Verify request comes from trusted backend"""
@@ -578,6 +596,362 @@ async def trigger_diary_generation(
             error=str(e),
         )
         raise HTTPException(500, f"Failed to generate diaries: {str(e)}")
+
+
+@app.get("/agent/{character_id}/wallet", response_model=WalletInfoResponse)
+async def get_character_wallet(
+    character_id: int,
+    player_address: str = Header(None, alias="X-Player-Address"),
+    authenticated: bool = Depends(verify_service_token),
+):
+    """
+    Get character's wallet address and LOVE token balance
+    """
+    if not player_address:
+        raise HTTPException(400, "Missing X-Player-Address header")
+
+    logger.info(
+        "wallet_info_requested",
+        character_id=character_id,
+        player_address=player_address,
+    )
+
+    try:
+        from .wallet_manager import get_wallet_manager
+
+        # Get wallet address from database
+        wallet_address = await agent_manager.storage.get_wallet_address(
+            character_id, player_address
+        )
+
+        if not wallet_address:
+            logger.warning(
+                "wallet_not_found",
+                character_id=character_id,
+                note="Character may need to be bonded first"
+            )
+            raise HTTPException(
+                404, f"Wallet not found for character {character_id}. Please bond the character first."
+            )
+
+        # Get LOVE token balance
+        wallet_mgr = get_wallet_manager()
+        balance = await wallet_mgr.get_love_balance(wallet_address)
+
+        logger.info(
+            "wallet_info_retrieved",
+            character_id=character_id,
+            wallet_address=wallet_address,
+            balance=balance
+        )
+
+        return WalletInfoResponse(
+            walletAddress=wallet_address,
+            loveBalance=balance
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "wallet_info_retrieval_failed",
+            character_id=character_id,
+            error=str(e),
+        )
+        raise HTTPException(500, f"Failed to retrieve wallet info: {str(e)}")
+
+
+# Gift response templates based on affection level
+GIFT_RESPONSE_TEMPLATES = {
+    "low": [  # 0-30 affection
+        "Thanks for the gift...",
+        "Oh, thank you.",
+        "I appreciate it.",
+    ],
+    "medium": [  # 31-70 affection
+        "Thank you so much! ❤️",
+        "This is really sweet of you!",
+        "I love it, thank you!",
+        "You're so thoughtful! ❤️",
+    ],
+    "high": [  # 71+ affection
+        "You're so generous! I love it! ❤️❤️",
+        "This means the world to me! Thank you! ❤️",
+        "I'm so lucky to have you! ❤️❤️",
+        "You always know how to make me happy! ❤️",
+    ]
+}
+
+
+def select_gift_response(affection_level: int, affection_boost: int) -> str:
+    """
+    Select appropriate gift response template based on affection level
+
+    Args:
+        affection_level: Current affection level (0-1000)
+        affection_boost: Affection increase from gift (unused, kept for API compatibility)
+
+    Returns:
+        str: Response message
+    """
+    import random
+
+    if affection_level <= 30:
+        tier = "low"
+    elif affection_level <= 70:
+        tier = "medium"
+    else:
+        tier = "high"
+
+    template = random.choice(GIFT_RESPONSE_TEMPLATES[tier])
+    return template
+
+
+def calculate_gift_affection(amount_love: float) -> int:
+    """
+    Calculate affection boost from gift amount.
+    In the future, this will factor in character personality.
+
+    Current formula: amount / 20
+    Examples:
+    - 100 LOVE → +5 affection
+    - 200 LOVE → +10 affection
+    - 500 LOVE → +25 affection
+    - 1000 LOVE → +50 affection
+    """
+    return int(amount_love / 20)
+
+
+@app.post("/agent/{character_id}/gift", response_model=GiftResponse)
+async def process_gift(
+    character_id: int,
+    request: GiftRequest,
+    player_address: str = Header(None, alias="X-Player-Address"),
+    authenticated: bool = Depends(verify_service_token),
+):
+    """
+    Verify LOVE token gift transaction and update affection level
+    """
+    if not player_address:
+        raise HTTPException(400, "Missing X-Player-Address header")
+
+    logger.info(
+        "gift_verification_requested",
+        character_id=character_id,
+        player_address=player_address,
+        tx_hash=request.txHash,
+        amount=request.amount
+    )
+
+    try:
+        from .wallet_manager import get_wallet_manager
+
+        # Get character wallet address
+        wallet_address = await agent_manager.storage.get_wallet_address(
+            character_id, player_address
+        )
+
+        if not wallet_address:
+            raise HTTPException(
+                404, f"Wallet not found for character {character_id}"
+            )
+
+        # Verify transaction on-chain
+        wallet_mgr = get_wallet_manager()
+        tx_data = await wallet_mgr.verify_gift_transaction(
+            tx_hash=request.txHash,
+            expected_recipient=wallet_address,
+            expected_sender=player_address,
+            min_amount=request.amount
+        )
+
+        if not tx_data:
+            logger.warning(
+                "gift_verification_failed",
+                character_id=character_id,
+                tx_hash=request.txHash,
+                note="Transaction verification failed"
+            )
+            return GiftResponse(
+                status="failed",
+                affectionChange=0,
+                newAffectionLevel=0,
+                message="Transaction verification failed. Please check the transaction hash and try again."
+            )
+
+        # Calculate affection boost based on gift amount
+        amount_love = tx_data["amount"] / 10**18  # Convert wei to LOVE tokens
+        affection_boost = calculate_gift_affection(amount_love)
+
+        # Load agent state to get current affection
+        agent_state = await agent_manager.storage.load_agent_state(
+            character_id, player_address
+        )
+
+        if not agent_state:
+            raise HTTPException(
+                404, f"Character {character_id} not initialized"
+            )
+
+        current_affection = agent_state["affection_level"]
+        new_affection = min(1000, current_affection + affection_boost)  # Cap at 1000
+
+        # Generate character's thank-you response based on affection level
+        character_message = select_gift_response(current_affection, affection_boost)
+
+        # Calculate new total_messages count (add 2 for gift exchange)
+        new_total_messages = agent_state["total_messages"] + 2
+
+        # Update affection and total_messages in database
+        await agent_manager.storage.update_progress(
+            character_id=character_id,
+            player_address=player_address,
+            affection_level=new_affection,
+            total_messages=new_total_messages
+        )
+
+        # Try to add gift messages to agent's conversation history if agent is active
+        try:
+            agent = agent_manager.active_agents.get(character_id)
+            if agent:
+                import time
+
+                # Add player's gift message
+                gift_message_player = {
+                    "sender": "player",
+                    "text": f"🎁 Sent {amount_love:.0f} LOVE",
+                    "timestamp": time.time()
+                }
+                # Add to BOTH lists (for UI display AND diary generation)
+                agent.state["messages_today"].append(gift_message_player)
+                agent.state["messages_for_compression"].append(gift_message_player)
+
+                # Maintain rolling window for messages_today (max 15)
+                if len(agent.state["messages_today"]) > 15:
+                    agent.state["messages_today"].pop(0)
+
+                # Increment counters
+                agent.state["total_messages"] += 1
+                agent.state["messages_today_count"] += 1
+
+                # Add character's response
+                gift_message_character = {
+                    "sender": "character",
+                    "text": character_message,
+                    "timestamp": time.time()
+                }
+                # Add to BOTH lists (for UI display AND diary generation)
+                agent.state["messages_today"].append(gift_message_character)
+                agent.state["messages_for_compression"].append(gift_message_character)
+
+                # Maintain rolling window for messages_today (max 15)
+                if len(agent.state["messages_today"]) > 15:
+                    agent.state["messages_today"].pop(0)
+
+                # Increment counters
+                agent.state["messages_today_count"] += 1
+
+                # Persist messages_today to database immediately so they show up on page refresh
+                hibernate_data = {
+                    "messages_today": agent.state["messages_today"],
+                    "today_date": agent.state.get("today_date")
+                }
+
+                await agent_manager.storage.save_hibernation_state(
+                    character_id=character_id,
+                    player_address=player_address,
+                    hibernate_data=hibernate_data,
+                    affection_level=agent.state["affection_level"],
+                    total_messages=agent.state["total_messages"]
+                )
+
+                logger.info(
+                    "gift_messages_added_to_agent",
+                    character_id=character_id,
+                    messages_today_count=len(agent.state["messages_today"]),
+                    messages_for_compression_count=len(agent.state["messages_for_compression"]),
+                    total_messages=agent.state["total_messages"],
+                    note="Added to both display and compression lists, persisted to DB for page refresh"
+                )
+            else:
+                # Agent is hibernated - add messages directly to hibernate_data
+                import time
+
+                hibernate_data = agent_state.get("hibernate_data") or {}
+                messages_today = hibernate_data.get("messages_today", [])
+
+                # Add gift messages
+                gift_message_player = {
+                    "sender": "player",
+                    "text": f"🎁 Sent {amount_love:.0f} LOVE",
+                    "timestamp": time.time()
+                }
+                messages_today.append(gift_message_player)
+
+                gift_message_character = {
+                    "sender": "character",
+                    "text": character_message,
+                    "timestamp": time.time()
+                }
+                messages_today.append(gift_message_character)
+
+                # Maintain rolling window (max 15)
+                while len(messages_today) > 15:
+                    messages_today.pop(0)
+
+                # Update hibernate_data
+                hibernate_data["messages_today"] = messages_today
+
+                # Save to database
+                await agent_manager.storage.save_hibernation_state(
+                    character_id=character_id,
+                    player_address=player_address,
+                    hibernate_data=hibernate_data,
+                    affection_level=new_affection,
+                    total_messages=new_total_messages
+                )
+
+                logger.info(
+                    "gift_messages_added_to_hibernated_agent",
+                    character_id=character_id,
+                    messages_today_count=len(messages_today),
+                    note="Agent hibernated - added gift messages directly to hibernate_data in DB"
+                )
+        except Exception as e:
+            logger.warning(
+                "failed_to_add_gift_to_agent_history",
+                character_id=character_id,
+                error=str(e),
+                note="Gift processed but not added to active agent history"
+            )
+
+        logger.info(
+            "gift_processed",
+            character_id=character_id,
+            tx_hash=request.txHash,
+            amount_love=amount_love,
+            affection_boost=affection_boost,
+            new_affection=new_affection,
+            character_response=character_message
+        )
+
+        return GiftResponse(
+            status="success",
+            affectionChange=affection_boost,
+            newAffectionLevel=new_affection,
+            message=f"Gift of {amount_love:.0f} LOVE received! Affection +{affection_boost}",
+            characterMessage=character_message
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "gift_processing_failed",
+            character_id=character_id,
+            error=str(e),
+        )
+        raise HTTPException(500, f"Failed to process gift: {str(e)}")
 
 
 # Startup/Shutdown Events

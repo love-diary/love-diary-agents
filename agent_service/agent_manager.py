@@ -214,6 +214,14 @@ class AgentManager:
         # Returns full version for display, stores compressed in state
         backstory_full = await agent.generate_backstory()
 
+        # Generate wallet for character to receive LOVE token gifts
+        wallet_address, wallet_encrypted_key = await agent.generate_wallet()
+        logger.info(
+            "character_wallet_created",
+            character_id=character_id,
+            wallet_address=wallet_address
+        )
+
         # Prepare player_info dict
         player_info = {
             "name": player_name,
@@ -232,6 +240,8 @@ class AgentManager:
             backstory=backstory_full,  # Save full version to database
             affection_level=agent.state["affection_level"],
             total_messages=agent.state["total_messages"],
+            wallet_address=wallet_address,
+            wallet_encrypted_key=wallet_encrypted_key,
         )
 
         # Add to active pool

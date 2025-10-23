@@ -12,6 +12,7 @@ import structlog
 from .llm import get_llm_provider, prompts
 from .postgres_storage import PostgresStorage
 from .config import settings
+from .wallet_manager import get_wallet_manager
 
 logger = structlog.get_logger()
 
@@ -738,6 +739,35 @@ class CharacterAgent:
         self.state["messages_today_count"] += 1  # Count greeting message
 
         return greeting_message
+
+    async def generate_wallet(self) -> tuple[str, bytes]:
+        """
+        Generate Ethereum wallet for character to receive LOVE token gifts
+
+        Returns:
+            tuple: (wallet_address, encrypted_private_key)
+        """
+        try:
+            wallet_mgr = get_wallet_manager()
+
+            # Generate new wallet with encrypted private key
+            wallet_address, encrypted_key = wallet_mgr.generate_wallet()
+
+            logger.info(
+                "wallet_generated_for_character",
+                character_id=self.character_id,
+                wallet_address=wallet_address
+            )
+
+            return wallet_address, encrypted_key
+
+        except Exception as e:
+            logger.error(
+                "wallet_generation_failed",
+                character_id=self.character_id,
+                error=str(e)
+            )
+            raise
 
     def get_state(self) -> Dict[str, Any]:
         """Export state for hibernation"""

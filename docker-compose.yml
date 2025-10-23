@@ -19,6 +19,10 @@ services:
       # Blockchain
       - BASE_RPC_URL=${BASE_RPC_URL:-https://sepolia.base.org}
       - CHARACTER_NFT_ADDRESS=${CHARACTER_NFT_ADDRESS}
+      - LOVE_TOKEN_ADDRESS=${LOVE_TOKEN_ADDRESS}
+
+      # Wallet Management
+      - WALLET_ENCRYPTION_KEY=${WALLET_ENCRYPTION_KEY}
 
       # AI/LLM
       - LLM_PROVIDER=${LLM_PROVIDER:-asi}

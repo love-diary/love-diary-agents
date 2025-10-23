@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS agent_states (
     affection_level INTEGER DEFAULT 0,
     total_messages INTEGER DEFAULT 0,
 
+    -- Character Wallet (for receiving LOVE token gifts)
+    -- wallet_address: Ethereum address (public key)
+    -- wallet_encrypted_key: AES-256 encrypted private key
+    wallet_address TEXT,
+    wallet_encrypted_key BYTEA,
+
     -- Ephemeral State Snapshot
     -- Structure: {messages_today: [{sender, text, timestamp}], today_date: str}
     -- Only populated during hibernation, NULL when agent is active

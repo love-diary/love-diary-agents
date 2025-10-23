@@ -15,6 +15,9 @@ httpx>=0.25.0  # Async HTTP client for ASI provider
 web3==6.11.3
 eth-account==0.10.0
 
+# Cryptography
+cryptography>=41.0.0  # For wallet private key encryption (Fernet)
+
 # Database
 asyncpg>=0.29.0  # Async PostgreSQL driver
 

@@ -194,7 +194,9 @@ class PostgresStorage:
         context_message_count: int = 0,
         affection_level: int = 0,
         total_messages: int = 0,
-        hibernate_data: Optional[Dict[str, Any]] = None
+        hibernate_data: Optional[Dict[str, Any]] = None,
+        wallet_address: Optional[str] = None,
+        wallet_encrypted_key: Optional[bytes] = None
     ):
         """
         Save complete agent state (INSERT or UPDATE)
@@ -219,8 +221,10 @@ class PostgresStorage:
                         context_message_count,
                         affection_level,
                         total_messages,
-                        hibernate_data
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        hibernate_data,
+                        wallet_address,
+                        wallet_encrypted_key
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     ON CONFLICT (character_id, player_address)
                     DO UPDATE SET
                         backstory = COALESCE(EXCLUDED.backstory, agent_states.backstory),
@@ -229,6 +233,8 @@ class PostgresStorage:
                         affection_level = EXCLUDED.affection_level,
                         total_messages = EXCLUDED.total_messages,
                         hibernate_data = EXCLUDED.hibernate_data,
+                        wallet_address = COALESCE(EXCLUDED.wallet_address, agent_states.wallet_address),
+                        wallet_encrypted_key = COALESCE(EXCLUDED.wallet_encrypted_key, agent_states.wallet_encrypted_key),
                         updated_at = NOW()
                     """,
                     character_id,
@@ -241,7 +247,9 @@ class PostgresStorage:
                     context_message_count,
                     affection_level,
                     total_messages,
-                    json.dumps(hibernate_data) if hibernate_data else None
+                    json.dumps(hibernate_data) if hibernate_data else None,
+                    wallet_address.lower() if wallet_address else None,
+                    wallet_encrypted_key
                 )
 
                 logger.info(
@@ -767,6 +775,155 @@ class PostgresStorage:
             character_id=character_id
         )
         pass
+
+    # ========================================================================
+    # Wallet Methods - For character wallet management
+    # ========================================================================
+
+    async def save_wallet(
+        self,
+        character_id: int,
+        player_address: str,
+        wallet_address: str,
+        wallet_encrypted_key: bytes
+    ):
+        """
+        Save character wallet (address + encrypted private key)
+
+        Args:
+            character_id: Character NFT token ID
+            player_address: Player's wallet address
+            wallet_address: Character's Ethereum wallet address (public key)
+            wallet_encrypted_key: Encrypted private key bytes
+        """
+        try:
+            # Normalize addresses to lowercase
+            player_address_normalized = player_address.lower()
+            wallet_address_normalized = wallet_address.lower()
+
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE agent_states
+                    SET
+                        wallet_address = $3,
+                        wallet_encrypted_key = $4,
+                        updated_at = NOW()
+                    WHERE character_id = $1 AND player_address = $2
+                    """,
+                    character_id,
+                    player_address_normalized,
+                    wallet_address_normalized,
+                    wallet_encrypted_key
+                )
+
+                logger.info(
+                    "wallet_saved",
+                    character_id=character_id,
+                    wallet_address=wallet_address_normalized
+                )
+
+        except Exception as e:
+            logger.error(
+                "wallet_save_failed",
+                character_id=character_id,
+                error=str(e)
+            )
+            raise
+
+    async def load_wallet(
+        self,
+        character_id: int,
+        player_address: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Load character wallet data
+
+        Args:
+            character_id: Character NFT token ID
+            player_address: Player's wallet address
+
+        Returns:
+            Dict with {wallet_address, wallet_encrypted_key} or None if not found
+        """
+        try:
+            # Normalize address to lowercase
+            player_address_normalized = player_address.lower()
+
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT wallet_address, wallet_encrypted_key
+                    FROM agent_states
+                    WHERE character_id = $1 AND player_address = $2
+                    """,
+                    character_id,
+                    player_address_normalized
+                )
+
+                if not row or not row["wallet_address"]:
+                    return None
+
+                wallet_data = {
+                    "wallet_address": row["wallet_address"],
+                    "wallet_encrypted_key": row["wallet_encrypted_key"]
+                }
+
+                logger.info(
+                    "wallet_loaded",
+                    character_id=character_id,
+                    wallet_address=wallet_data["wallet_address"]
+                )
+
+                return wallet_data
+
+        except Exception as e:
+            logger.error(
+                "wallet_load_failed",
+                character_id=character_id,
+                error=str(e)
+            )
+            return None
+
+    async def get_wallet_address(
+        self,
+        character_id: int,
+        player_address: str
+    ) -> Optional[str]:
+        """
+        Get character wallet address (public key only, no decryption needed)
+
+        Args:
+            character_id: Character NFT token ID
+            player_address: Player's wallet address
+
+        Returns:
+            Wallet address or None if not found
+        """
+        try:
+            # Normalize address to lowercase
+            player_address_normalized = player_address.lower()
+
+            async with self.pool.acquire() as conn:
+                wallet_address = await conn.fetchval(
+                    """
+                    SELECT wallet_address
+                    FROM agent_states
+                    WHERE character_id = $1 AND player_address = $2
+                    """,
+                    character_id,
+                    player_address_normalized
+                )
+
+                return wallet_address
+
+        except Exception as e:
+            logger.error(
+                "wallet_address_lookup_failed",
+                character_id=character_id,
+                error=str(e)
+            )
+            return None
 
     async def close(self):
         """Close connection pool"""
