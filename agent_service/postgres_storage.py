@@ -127,6 +127,8 @@ class PostgresStorage:
                         affection_level,
                         total_messages,
                         hibernate_data,
+                        wallet_address,
+                        wallet_encrypted_key,
                         created_at,
                         updated_at,
                         hibernated_at
@@ -162,6 +164,8 @@ class PostgresStorage:
                     "affection_level": row["affection_level"],
                     "total_messages": row["total_messages"],
                     "hibernate_data": parse_json_field(row["hibernate_data"]),
+                    "wallet_address": row["wallet_address"],
+                    "wallet_encrypted_key": row["wallet_encrypted_key"],
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
                     "hibernated_at": row["hibernated_at"],

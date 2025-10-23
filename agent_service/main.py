@@ -7,9 +7,11 @@ import os
 import time
 from fastapi import FastAPI, Header, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import structlog
+from pathlib import Path
 
 from .agent_manager import AgentManager
 from .config import settings
@@ -33,6 +35,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount static files for character images
+IMAGES_DIR = Path(os.getenv("IMAGES_DIR", "/var/www/love-diary-images"))
+if IMAGES_DIR.exists():
+    app.mount("/character-images", StaticFiles(directory=str(IMAGES_DIR)), name="character-images")
+    logger.info("static_files_mounted", directory=str(IMAGES_DIR))
+else:
+    logger.warning("images_directory_not_found", directory=str(IMAGES_DIR), note="Character images will not be served")
 
 # Initialize Agent Manager (singleton)
 agent_manager = AgentManager()
@@ -87,6 +97,7 @@ class CharacterInfoResponse(BaseModel):
     totalMessages: int
     playerName: str
     playerGender: str
+    imageUrl: Optional[str] = None
 
 
 class DiaryListItem(BaseModel):
@@ -116,6 +127,12 @@ class GiftResponse(BaseModel):
     newAffectionLevel: int
     message: str
     characterMessage: Optional[str] = None  # Character's response to gift
+
+
+class GenerateImageResponse(BaseModel):
+    status: str  # "success" | "failed" | "already_exists"
+    imageUrl: Optional[str] = None
+    message: str
 
 
 # Authentication Dependency
@@ -288,6 +305,7 @@ async def send_message(
 @app.get("/agent/{character_id}/info", response_model=CharacterInfoResponse)
 async def get_character_info(
     character_id: int,
+    background_tasks: BackgroundTasks,
     player_address: str = Header(None, alias="X-Player-Address"),
     authenticated: bool = Depends(verify_service_token),
 ):
@@ -360,6 +378,34 @@ async def get_character_info(
         # Get player info from database
         player_info = agent_state.get("player_info") or {}
 
+        # Check if character image exists
+        image_path = IMAGES_DIR / f"{character_id}.png"
+        image_url = f"/character-images/{character_id}.png" if image_path.exists() else None
+
+        # Backfill: If image doesn't exist, trigger generation in background
+        if not image_path.exists():
+            logger.info(
+                "image_missing_triggering_backfill",
+                character_id=character_id
+            )
+
+            async def backfill_image_task():
+                try:
+                    from .image_generator import get_image_generator
+                    image_generator = get_image_generator()
+                    character_data = agent_state.get("character_nft")
+                    if character_data:
+                        await image_generator.generate_character_image(
+                            character_id=character_id,
+                            character_data=character_data
+                        )
+                        logger.info("backfill_image_generated", character_id=character_id)
+                except Exception as e:
+                    logger.error("backfill_image_failed", character_id=character_id, error=str(e))
+
+            # Add to FastAPI background tasks
+            background_tasks.add_task(backfill_image_task)
+
         return CharacterInfoResponse(
             affectionLevel=agent_state["affection_level"],
             backstory=agent_state["backstory"],  # Full backstory for modal display
@@ -367,6 +413,7 @@ async def get_character_info(
             totalMessages=agent_state["total_messages"],
             playerName=player_info.get("name", "Player"),
             playerGender=player_info.get("gender", "Male"),
+            imageUrl=image_url,
         )
 
     except HTTPException:
@@ -952,6 +999,86 @@ async def process_gift(
             error=str(e),
         )
         raise HTTPException(500, f"Failed to process gift: {str(e)}")
+
+
+async def _generate_character_image_task(character_id: int):
+    """Background task to generate character image"""
+    try:
+        from .image_generator import get_image_generator
+
+        # Fetch character data from blockchain
+        character_data = await agent_manager.blockchain.get_character_data(character_id)
+
+        # Generate image (this takes 5-10 seconds)
+        image_generator = get_image_generator()
+        image_url = await image_generator.generate_character_image(
+            character_id=character_id,
+            character_data=character_data
+        )
+
+        if not image_url:
+            logger.error(
+                "image_generation_failed",
+                character_id=character_id,
+                note="Image generator returned None"
+            )
+        else:
+            logger.info(
+                "image_generated_successfully",
+                character_id=character_id,
+                image_url=image_url
+            )
+    except Exception as e:
+        logger.error(
+            "image_generation_error",
+            character_id=character_id,
+            error=str(e),
+            error_type=type(e).__name__
+        )
+
+
+@app.post("/character/{character_id}/generate-image", response_model=GenerateImageResponse)
+async def generate_character_image(
+    character_id: int,
+    background_tasks: BackgroundTasks,
+    authenticated: bool = Depends(verify_service_token),
+):
+    """
+    Generate AI portrait for a character (called after minting or as backfill)
+    Uses DALL-E 3 to create anime-style profile picture based on character traits
+    """
+    logger.info(
+        "image_generation_requested",
+        character_id=character_id
+    )
+
+    # Check if image already exists
+    image_path = IMAGES_DIR / f"{character_id}.png"
+    if image_path.exists():
+        logger.info(
+            "image_already_exists",
+            character_id=character_id,
+            image_path=str(image_path)
+        )
+        return GenerateImageResponse(
+            status="already_exists",
+            imageUrl=f"/character-images/{character_id}.png",
+            message="Character image already exists"
+        )
+
+    # Add to FastAPI background tasks (proper way to handle async background work)
+    background_tasks.add_task(_generate_character_image_task, character_id)
+
+    logger.info(
+        "image_generation_started_background",
+        character_id=character_id
+    )
+
+    return GenerateImageResponse(
+        status="success",
+        imageUrl=None,
+        message="Image generation started in background"
+    )
 
 
 # Startup/Shutdown Events

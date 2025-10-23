@@ -30,6 +30,9 @@ services:
       - ASI_MINI_API_URL=${ASI_MINI_API_URL:-https://api.asi1.ai/v1}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
 
+      # Image Storage
+      - IMAGES_DIR=/var/www/love-diary-images
+
       # Database (PostgreSQL via Supabase)
       - DATABASE_URL=${DATABASE_URL}
 
@@ -51,6 +54,7 @@ services:
 
     volumes:
       - ./logs:/app/logs
+      - /var/www/love-diary-images:/var/www/love-diary-images
 
     logging:
       driver: "json-file"
